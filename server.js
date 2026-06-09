@@ -1,4 +1,6 @@
-// server.js - OpenAI to NVIDIA NIM API Proxy (Kimi K2.6 Edition)
+// server.js - Advanced OpenAI to NVIDIA NIM API Proxy (Kimi K2.6 Edition)
+// Supports: Vision (Multimodal), Deep Reasoning, and Native Tool Use (Function Calling)
+
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -6,83 +8,96 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
+// Middleware - Max limit increased to 50mb to support base64 vision/image uploads smoothly
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // NVIDIA NIM API configuration
-const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
+const NIM_API_BASE = process.env.NIM_API_BASE || 'https://nvidia.com';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
-// 🔥 REASONING DISPLAY TOGGLE - Shows/hides reasoning in output
-const SHOW_REASONING = false; // Set to true to show reasoning with <think> tags
+// 🔥 GLOBAL TOGGLES FOR ADVANCED FEATURES
+const SHOW_REASONING = true;        // Set true to wrap Kimi's internal thinking steps inside <think> tags
+const FORCE_THINKING_MODE = true;   // Injects chat_template_kwargs parameter for heavy reasoning tasks
 
-// 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it
-const ENABLE_THINKING_MODE = false; // Set to true to enable chat_template_kwargs thinking parameter
-
-// Model mapping — all routes lead to Kimi K2.6
+const DEFAULT_MODEL = 'moonshotai/kimi-k2.6';
 const MODEL_MAPPING = {
-  'gpt-3.5-turbo':  'moonshotai/kimi-k2.6',
-  'gpt-4':          'moonshotai/kimi-k2.6',
-  'gpt-4-turbo':    'moonshotai/kimi-k2.6',
-  'gpt-4o':         'moonshotai/kimi-k2.6',
-  'claude-3-opus':  'moonshotai/kimi-k2.6',
-  'claude-3-sonnet':'moonshotai/kimi-k2.6',
-  'gemini-pro':     'moonshotai/kimi-k2.6',
-  'kimi-k2.6':      'moonshotai/kimi-k2.6'  // direct alias
+  'gpt-3.5-turbo':   DEFAULT_MODEL,
+  'gpt-4':           DEFAULT_MODEL,
+  'gpt-4-turbo':     DEFAULT_MODEL,
+  'gpt-4o':          DEFAULT_MODEL,
+  'claude-3-opus':   DEFAULT_MODEL,
+  'claude-3-sonnet': DEFAULT_MODEL,
+  'gemini-pro':      DEFAULT_MODEL,
+  'kimi-k2.6':       DEFAULT_MODEL
 };
 
-// Default fallback model
-const DEFAULT_MODEL = 'moonshotai/kimi-k2.6';
-
-// Health check endpoint
+// Health Check
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
-    service: 'OpenAI to NVIDIA NIM Proxy — Kimi K2.6',
-    default_model: DEFAULT_MODEL,
+    service: 'Kimi K2.6 Advanced Proxy',
+    capabilities: ['vision', 'reasoning', 'tool_use'],
     reasoning_display: SHOW_REASONING,
-    thinking_mode: ENABLE_THINKING_MODE
+    thinking_mode: FORCE_THINKING_MODE
   });
 });
 
-// List models endpoint (OpenAI compatible)
+// OpenAI compatible model listing
 app.get('/v1/models', (req, res) => {
   const models = Object.keys(MODEL_MAPPING).map(model => ({
     id: model,
     object: 'model',
-    created: Date.now(),
+    created: Math.floor(Date.now() / 1000),
     owned_by: 'nvidia-nim-proxy'
   }));
-
-  res.json({
-    object: 'list',
-    data: models
-  });
+  res.json({ object: 'list', data: models });
 });
 
-// Chat completions endpoint (main proxy)
+// Main Chat Completions Endpoint
 app.post('/v1/chat/completions', async (req, res) => {
   try {
-    const { model, messages, temperature, max_tokens, stream } = req.body;
-
-    // Always resolve to Kimi K2.6; unknown models fall back to it too
+    const { model, messages, temperature, max_tokens, stream, tools, tool_choice } = req.body;
     const nimModel = MODEL_MAPPING[model] || DEFAULT_MODEL;
 
-    // Transform OpenAI request to NIM format
+    // 1. VISION SUPPORT: Process OpenAI multimodal message format natively
+    const formattedMessages = messages.map(msg => {
+      if (Array.isArray(msg.content)) {
+        return {
+          role: msg.role,
+          content: msg.content.map(part => {
+            if (part.type === 'image_url') {
+              // Standardizes OpenAI image format to standard multimodal spec
+              return {
+                type: 'image_url',
+                image_url: { url: part.image_url.url }
+              };
+            }
+            return part;
+          })
+        };
+      }
+      return msg;
+    });
+
+    // 2. REASONING & TOOL USE SUPPORT: Construct payload for NVIDIA NIM
     const nimRequest = {
       model: nimModel,
-      messages: messages,
-      temperature: temperature !== undefined ? temperature : 1.0,
+      messages: formattedMessages,
+      temperature: temperature !== undefined ? temperature : 0.7,
       top_p: 1.0,
       max_tokens: max_tokens || 16384,
-      extra_body: ENABLE_THINKING_MODE
-        ? { chat_template_kwargs: { thinking: true } }
-        : undefined,
-      stream: stream || false
+      stream: stream || false,
+      // Pass client tools (Cursor/Chatbox agents) straight to Kimi's native tool tracker
+      tools: tools || undefined,
+      tool_choice: tool_choice || undefined,
+      // Inject native thinking parameter if toggled or needed by agent
+      extra_body: FORCE_THINKING_MODE 
+        ? { chat_template_kwargs: { thinking: true } } 
+        : undefined
     };
 
-    // Make request to NVIDIA NIM API
     const response = await axios.post(
       `${NIM_API_BASE}/chat/completions`,
       nimRequest,
@@ -96,8 +111,8 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     );
 
+    // 3. STREAMING OUTPUT HANDLER
     if (stream) {
-      // Handle streaming response
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
@@ -120,9 +135,11 @@ app.post('/v1/chat/completions', async (req, res) => {
             try {
               const data = JSON.parse(line.slice(6));
               if (data.choices?.[0]?.delta) {
-                const reasoning = data.choices[0].delta.reasoning_content;
-                const content = data.choices[0].delta.content;
+                const delta = data.choices[0].delta;
+                const reasoning = delta.reasoning_content;
+                const content = delta.content;
 
+                // Dynamically intercept reasoning content chunks and format them into <think> tags
                 if (SHOW_REASONING) {
                   let combinedContent = '';
                   if (reasoning && !reasoningStarted) {
@@ -132,18 +149,19 @@ app.post('/v1/chat/completions', async (req, res) => {
                     combinedContent = reasoning;
                   }
                   if (content && reasoningStarted) {
-                    combinedContent += '</think>\n\n' + content;
+                    combinedContent += '\n</think>\n\n' + content;
                     reasoningStarted = false;
                   } else if (content) {
                     combinedContent += content;
                   }
                   if (combinedContent) {
-                    data.choices[0].delta.content = combinedContent;
-                    delete data.choices[0].delta.reasoning_content;
+                    delta.content = combinedContent;
                   }
-                } else {
-                  data.choices[0].delta.content = content || '';
-                  delete data.choices[0].delta.reasoning_content;
+                }
+                
+                // Keep tool calls intact during stream chunks for agents like Cursor / Aider
+                if (delta.tool_calls) {
+                  delta.tool_calls = delta.tool_calls;
                 }
               }
               res.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -155,79 +173,56 @@ app.post('/v1/chat/completions', async (req, res) => {
       });
 
       response.data.on('end', () => res.end());
-      response.data.on('error', (err) => {
-        console.error('Stream error:', err);
-        res.end();
-      });
+      response.data.on('error', (err) => { res.end(); });
 
     } else {
-      // Transform NIM response to OpenAI format
+      // 4. NON-STREAMING (JSON) OUTPUT HANDLER
+      const choice = response.data.choices[0];
+      let fullContent = choice.message?.content || '';
+
+      // Format non-streaming reasoning blocks
+      if (SHOW_REASONING && choice.message?.reasoning_content) {
+        fullContent = `<think>\n${choice.message.reasoning_content}\n</think>\n\n${fullContent}`;
+      }
+
       const openaiResponse = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
-        model: model || 'kimi-k2.6',
-        choices: response.data.choices.map(choice => {
-          let fullContent = choice.message?.content || '';
-
-          if (SHOW_REASONING && choice.message?.reasoning_content) {
-            fullContent =
-              '<think>\n' +
-              choice.message.reasoning_content +
-              '\n</think>\n\n' +
-              fullContent;
-          }
-
-          return {
-            index: choice.index,
-            message: {
-              role: choice.message.role,
-              content: fullContent
-            },
-            finish_reason: choice.finish_reason
-          };
-        }),
-        usage: response.data.usage || {
-          prompt_tokens: 0,
-          completion_tokens: 0,
-          total_tokens: 0
-        }
+        model: model || 'gpt-4o',
+        choices: [{
+          index: 0,
+          message: {
+            role: choice.message.role,
+            content: fullContent,
+            // Return tools safely to client if Kimi executed a tool invocation step
+            tool_calls: choice.message.tool_calls || undefined
+          },
+          finish_reason: choice.finish_reason
+        }],
+        usage: response.data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
       };
 
       res.json(openaiResponse);
     }
 
   } catch (error) {
-    console.error('Proxy error:', error.message);
-    if (error.response?.data) {
-      console.error('NIM error body:', JSON.stringify(error.response.data));
-    }
-
     res.status(error.response?.status || 500).json({
       error: {
-        message: error.message || 'Internal server error',
-        type: 'invalid_request_error',
+        message: error.message || 'Internal proxy server error',
+        type: 'proxy_error',
         code: error.response?.status || 500
       }
     });
   }
 });
 
-// Catch-all for unsupported endpoints
+// Catch-all
 app.all('*', (req, res) => {
-  res.status(404).json({
-    error: {
-      message: `Endpoint ${req.path} not found`,
-      type: 'invalid_request_error',
-      code: 404
-    }
-  });
+  res.status(404).json({ error: { message: `Endpoint ${req.path} not found`, type: 'invalid_request_error', code: 404 } });
 });
 
 app.listen(PORT, () => {
-  console.log(`OpenAI → NVIDIA NIM Proxy (Kimi K2.6) running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log(`Default model: ${DEFAULT_MODEL}`);
-  console.log(`Reasoning display: ${SHOW_REASONING ? 'ENABLED' : 'DISABLED'}`);
-  console.log(`Thinking mode: ${ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED'}`);
+  console.log(`Server running on port ${PORT}`);
 });
+
