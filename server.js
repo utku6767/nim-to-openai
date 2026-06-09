@@ -81,7 +81,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     const nimRequest = {
       model: nimModel,
       messages: formattedMessages,
-      temperature: temperature !== undefined ? temperature : 1.0,
+      temperature: temperature !== undefined ? temperature : 0.6,
       top_p: 1.0,
       max_tokens: max_tokens || 16384,
       stream: stream || false,
