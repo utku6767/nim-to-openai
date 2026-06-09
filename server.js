@@ -1,6 +1,5 @@
-// server.js - Advanced OpenAI to NVIDIA NIM API Proxy (Kimi K2.6 Edition)
-// Supports: Vision (Multimodal), Deep Reasoning, and Native Tool Use (Function Calling)
-
+// server.js - OpenAI to NVIDIA NIM API Proxy (Kimi K2.6 Edition)
+// Features: Vision (multimodal), Tool Use (function calling)
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -8,7 +7,7 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware - Max limit increased to 50mb to support base64 vision/image uploads smoothly
+// Middleware — 50mb limit for base64 image uploads
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
@@ -17,34 +16,31 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
-// 🔥 GLOBAL TOGGLES FOR ADVANCED FEATURES
-const SHOW_REASONING = true;        // Set true to wrap Kimi's internal thinking steps inside <think> tags
-const FORCE_THINKING_MODE = true;   // Injects chat_template_kwargs parameter for heavy reasoning tasks
-
-const DEFAULT_MODEL = 'moonshotai/kimi-k2.6';
+// Model mapping — all routes lead to Kimi K2.6
 const MODEL_MAPPING = {
-  'gpt-3.5-turbo':   DEFAULT_MODEL,
-  'gpt-4':           DEFAULT_MODEL,
-  'gpt-4-turbo':     DEFAULT_MODEL,
-  'gpt-4o':          DEFAULT_MODEL,
-  'claude-3-opus':   DEFAULT_MODEL,
-  'claude-3-sonnet': DEFAULT_MODEL,
-  'gemini-pro':      DEFAULT_MODEL,
-  'kimi-k2.6':       DEFAULT_MODEL
+  'gpt-3.5-turbo':   'moonshotai/kimi-k2.6',
+  'gpt-4':           'moonshotai/kimi-k2.6',
+  'gpt-4-turbo':     'moonshotai/kimi-k2.6',
+  'gpt-4o':          'moonshotai/kimi-k2.6',
+  'claude-3-opus':   'moonshotai/kimi-k2.6',
+  'claude-3-sonnet': 'moonshotai/kimi-k2.6',
+  'gemini-pro':      'moonshotai/kimi-k2.6',
+  'kimi-k2.6':       'moonshotai/kimi-k2.6'
 };
 
-// Health Check
+const DEFAULT_MODEL = 'moonshotai/kimi-k2.6';
+
+// Health check endpoint
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
-    service: 'Kimi K2.6 Advanced Proxy',
-    capabilities: ['vision', 'reasoning', 'tool_use'],
-    reasoning_display: SHOW_REASONING,
-    thinking_mode: FORCE_THINKING_MODE
+    service: 'OpenAI to NVIDIA NIM Proxy — Kimi K2.6',
+    default_model: DEFAULT_MODEL,
+    capabilities: ['vision', 'tool_use']
   });
 });
 
-// OpenAI compatible model listing
+// List models endpoint (OpenAI compatible)
 app.get('/v1/models', (req, res) => {
   const models = Object.keys(MODEL_MAPPING).map(model => ({
     id: model,
@@ -55,20 +51,20 @@ app.get('/v1/models', (req, res) => {
   res.json({ object: 'list', data: models });
 });
 
-// Main Chat Completions Endpoint
+// Chat completions endpoint (main proxy)
 app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream, tools, tool_choice } = req.body;
+
     const nimModel = MODEL_MAPPING[model] || DEFAULT_MODEL;
 
-    // 1. VISION SUPPORT: Process OpenAI multimodal message format natively
+    // VISION: Normalize OpenAI multimodal message format for NIM
     const formattedMessages = messages.map(msg => {
       if (Array.isArray(msg.content)) {
         return {
           role: msg.role,
           content: msg.content.map(part => {
             if (part.type === 'image_url') {
-              // Standardizes OpenAI image format to standard multimodal spec
               return {
                 type: 'image_url',
                 image_url: { url: part.image_url.url }
@@ -81,21 +77,17 @@ app.post('/v1/chat/completions', async (req, res) => {
       return msg;
     });
 
-    // 2. REASONING & TOOL USE SUPPORT: Construct payload for NVIDIA NIM
+    // Build NIM request
     const nimRequest = {
       model: nimModel,
       messages: formattedMessages,
-      temperature: temperature !== undefined ? temperature : 0.7,
+      temperature: temperature !== undefined ? temperature : 1.0,
       top_p: 1.0,
       max_tokens: max_tokens || 16384,
       stream: stream || false,
-      // Pass client tools (Cursor/Chatbox agents) straight to Kimi's native tool tracker
-      tools: tools || undefined,
-      tool_choice: tool_choice || undefined,
-      // Inject native thinking parameter if toggled or needed by agent
-      extra_body: FORCE_THINKING_MODE 
-        ? { chat_template_kwargs: { thinking: true } } 
-        : undefined
+      // TOOL USE: pass through function definitions if provided
+      ...(tools && { tools }),
+      ...(tool_choice && { tool_choice })
     };
 
     const response = await axios.post(
@@ -111,14 +103,12 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     );
 
-    // 3. STREAMING OUTPUT HANDLER
     if (stream) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
 
       let buffer = '';
-      let reasoningStarted = false;
 
       response.data.on('data', (chunk) => {
         buffer += chunk.toString();
@@ -136,33 +126,9 @@ app.post('/v1/chat/completions', async (req, res) => {
               const data = JSON.parse(line.slice(6));
               if (data.choices?.[0]?.delta) {
                 const delta = data.choices[0].delta;
-                const reasoning = delta.reasoning_content;
-                const content = delta.content;
-
-                // Dynamically intercept reasoning content chunks and format them into <think> tags
-                if (SHOW_REASONING) {
-                  let combinedContent = '';
-                  if (reasoning && !reasoningStarted) {
-                    combinedContent = '<think>\n' + reasoning;
-                    reasoningStarted = true;
-                  } else if (reasoning) {
-                    combinedContent = reasoning;
-                  }
-                  if (content && reasoningStarted) {
-                    combinedContent += '\n</think>\n\n' + content;
-                    reasoningStarted = false;
-                  } else if (content) {
-                    combinedContent += content;
-                  }
-                  if (combinedContent) {
-                    delta.content = combinedContent;
-                  }
-                }
-                
-                // Keep tool calls intact during stream chunks for agents like Cursor / Aider
-                if (delta.tool_calls) {
-                  delta.tool_calls = delta.tool_calls;
-                }
+                // Strip reasoning content — clean output only
+                delete delta.reasoning_content;
+                // Tool call chunks pass through untouched
               }
               res.write(`data: ${JSON.stringify(data)}\n\n`);
             } catch (e) {
@@ -173,44 +139,54 @@ app.post('/v1/chat/completions', async (req, res) => {
       });
 
       response.data.on('end', () => res.end());
-      response.data.on('error', (err) => { res.end(); });
+      response.data.on('error', (err) => {
+        console.error('Stream error:', err);
+        res.end();
+      });
 
     } else {
-      // 4. NON-STREAMING (JSON) OUTPUT HANDLER
-      const choice = response.data.choices[0];
-      let fullContent = choice.message?.content || '';
+      const choices = response.data.choices.map(choice => {
+        const message = {
+          role: choice.message.role,
+          content: choice.message.content || ''
+          // reasoning_content intentionally omitted
+        };
 
-      // Format non-streaming reasoning blocks
-      if (SHOW_REASONING && choice.message?.reasoning_content) {
-        fullContent = `<think>\n${choice.message.reasoning_content}\n</think>\n\n${fullContent}`;
-      }
+        // TOOL USE: include tool_calls if Kimi returned them
+        if (choice.message.tool_calls) {
+          message.tool_calls = choice.message.tool_calls;
+        }
 
-      const openaiResponse = {
+        return {
+          index: choice.index,
+          message,
+          finish_reason: choice.finish_reason
+        };
+      });
+
+      res.json({
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
-        model: model || 'gpt-4o',
-        choices: [{
-          index: 0,
-          message: {
-            role: choice.message.role,
-            content: fullContent,
-            // Return tools safely to client if Kimi executed a tool invocation step
-            tool_calls: choice.message.tool_calls || undefined
-          },
-          finish_reason: choice.finish_reason
-        }],
-        usage: response.data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-      };
-
-      res.json(openaiResponse);
+        model: model || 'kimi-k2.6',
+        choices,
+        usage: response.data.usage || {
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_tokens: 0
+        }
+      });
     }
 
   } catch (error) {
+    console.error('Proxy error:', error.message);
+    if (error.response?.data) {
+      console.error('NIM error body:', JSON.stringify(error.response.data));
+    }
     res.status(error.response?.status || 500).json({
       error: {
-        message: error.message || 'Internal proxy server error',
-        type: 'proxy_error',
+        message: error.message || 'Internal server error',
+        type: 'invalid_request_error',
         code: error.response?.status || 500
       }
     });
@@ -219,10 +195,17 @@ app.post('/v1/chat/completions', async (req, res) => {
 
 // Catch-all
 app.all('*', (req, res) => {
-  res.status(404).json({ error: { message: `Endpoint ${req.path} not found`, type: 'invalid_request_error', code: 404 } });
+  res.status(404).json({
+    error: {
+      message: `Endpoint ${req.path} not found`,
+      type: 'invalid_request_error',
+      code: 404
+    }
+  });
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`OpenAI → NVIDIA NIM Proxy (Kimi K2.6) running on port ${PORT}`);
+  console.log(`Health check: http://localhost:${PORT}/health`);
+  console.log(`Default model: ${DEFAULT_MODEL}`);
 });
-
