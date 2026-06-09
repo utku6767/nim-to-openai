@@ -85,7 +85,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       top_p: 1.0,
       max_tokens: max_tokens || 16384,
       stream: stream || false,
-      // TOOL USE: pass through function definitions if provided
       ...(tools && { tools }),
       ...(tool_choice && { tool_choice })
     };
@@ -126,9 +125,15 @@ app.post('/v1/chat/completions', async (req, res) => {
               const data = JSON.parse(line.slice(6));
               if (data.choices?.[0]?.delta) {
                 const delta = data.choices[0].delta;
-                // Strip reasoning content — clean output only
+
+                // Always strip reasoning
                 delete delta.reasoning_content;
-                // Tool call chunks pass through untouched
+
+                // If this chunk contains tool_calls, null out any
+                // content that leaked alongside it to prevent bleed
+                if (delta.tool_calls && delta.tool_calls.length > 0) {
+                  delta.content = null;
+                }
               }
               res.write(`data: ${JSON.stringify(data)}\n\n`);
             } catch (e) {
@@ -148,11 +153,12 @@ app.post('/v1/chat/completions', async (req, res) => {
       const choices = response.data.choices.map(choice => {
         const message = {
           role: choice.message.role,
-          content: choice.message.content || ''
-          // reasoning_content intentionally omitted
+          // If tool_calls present, content should be null not empty string
+          content: choice.message.tool_calls
+            ? null
+            : (choice.message.content || '')
         };
 
-        // TOOL USE: include tool_calls if Kimi returned them
         if (choice.message.tool_calls) {
           message.tool_calls = choice.message.tool_calls;
         }
